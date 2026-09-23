@@ -19,9 +19,12 @@ the same setting names is how you end up carefully editing the one nothing reads
 
 The names are the conventional ones you likely already export for other tools:
 
-    TYPESAFE_API_KEY     TypeSafe Jev — the "mouthless" model that judges intent + risk
-    TYPESAFE_BASE_URL    default https://api.typesafe.ai   (gateways: see README)
-    TYPESAFE_MODEL       default jev-latest
+    判断层 runs fully local (laya-coreml) and needs no key:
+    LAYA_COREML_MODEL    default aac6fef/laya-multilingual-coreml
+
+    TYPESAFE_API_KEY     legacy: only the manual `judge_jev.py` CLI reads these
+    TYPESAFE_BASE_URL    the app itself no longer calls TypeSafe Jev
+    TYPESAFE_MODEL
 
     OPENAI_API_KEY       reply-candidate generation, any OpenAI-compatible endpoint
     OPENAI_BASE_URL      e.g. https://api.deepseek.com, http://localhost:11434/v1

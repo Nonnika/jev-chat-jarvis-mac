@@ -16,6 +16,7 @@ import numpy as np
 # 此前这里是一份手工同步的副本，judge.py 改了描述这里不会跟着变，回归就在
 # 测一个没人用的配置（与 dtype 那条注释是同一个原则）。
 from judge import INTENTS
+from judge_laya import laya_model
 
 # (message text, gold intent) — includes the live-captured ones
 CASES: list[tuple[str, str]] = [
@@ -80,12 +81,15 @@ def run_decider() -> dict:
     return {"model": "decider-2b", "elapsed_s": time.perf_counter() - t0, "results": results}
 
 
-def run_laya_multilingual() -> dict:
-    """convaiinnovations/laya multilingual checkpoint (Chinese-capable per its card)."""
-    import laya
+def run_laya_coreml() -> dict:
+    """laya-coreml (aac6fef/laya-multilingual-coreml) — the shipped judge backend.
 
-    agent = laya.load("convaiinnovations/laya", subfolder="multilingual")
-    names = list(INTENTS)
+    Must build its question dict exactly like judge_laya.LayaJudge.judge: a regression
+    measuring a different prompt is measuring a configuration nobody ships.
+    """
+    import laya_coreml as laya
+
+    agent = laya.load(laya_model())
     question = {
         "intent": {"type": "choice",
                    "instructions": "这句话的真实意图是什么？",
@@ -98,13 +102,13 @@ def run_laya_multilingual() -> dict:
         try:
             out = agent.predict(text, question)
             ans = out["answers"]["intent"]
-            probs = ans.get("probabilities") or ans.get("probs") or {}
+            probs = ans.get("probabilities") or {}
             pred = ans.get("choice")
             conf = float(ans.get("confidence", 0.0))
         except Exception as e:
             pred, conf = f"ERR:{type(e).__name__}", 0.0
         results.append({"text": text, "gold": gold, "pred": pred, "conf": conf})
-    return {"model": "laya-multilingual", "elapsed_s": time.perf_counter() - t0,
+    return {"model": f"laya-coreml ({laya_model()})", "elapsed_s": time.perf_counter() - t0,
             "results": results}
 
 
@@ -131,7 +135,7 @@ def main() -> None:
     out_path.parent.mkdir(exist_ok=True)
     report = {}
 
-    for name, fn in (("decider", run_decider), ("laya_ml", run_laya_multilingual)):
+    for name, fn in (("decider", run_decider), ("laya_coreml", run_laya_coreml)):
         print(f"\n===== {name} =====", flush=True)
         try:
             run = fn()

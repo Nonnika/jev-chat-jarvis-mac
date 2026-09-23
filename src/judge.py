@@ -58,6 +58,8 @@ ACTION_MAP = {
 class Judge:
     """Wraps a decoder-only decision model; lazy-loads on first use."""
 
+    label = "本地 decider-2b"
+
     def __init__(self, repo: str = "Mapika/decider-2b", device: str | None = None):
         import torch
 
@@ -208,16 +210,19 @@ if __name__ == "__main__":
 
 
 class FallbackJudge:
-    """Prefer the official Jev API; drop to the local model if it fails.
+    """Prefer the local laya-coreml judge; drop to decider-2b if it fails.
 
-    A judgment layer that dies because a key expired or a gateway hiccuped would take the
-    whole panel down, so the first failure switches permanently to the local model and the
-    verdict carries which backend produced it.
+    A judgment layer that dies because the Core ML package failed to load or a forward
+    pass blew up would take the whole panel down, so the first failure switches
+    permanently to the decider-2b model and the verdict carries which backend produced
+    it.
     """
 
+    label = "本地 laya-coreml"
+
     def __init__(self):
-        import judge_jev
-        self.primary = judge_jev.JevJudge()
+        import judge_laya
+        self.primary = judge_laya.LayaJudge()
         self.local = None
         self.fell_back = False
         self.reason = ""
@@ -235,7 +240,7 @@ class FallbackJudge:
                 self.fell_back = True
                 self.reason = f"{type(e).__name__}: {str(e)[:80]}"
         out = self._fallback().judge(message, context)
-        out["backend"] = f"local (Jev 不可用: {self.reason})"
+        out["backend"] = f"local (laya 不可用: {self.reason})"
         return out
 
     def rank_candidates(self, message: str, intent: str, candidates: list[str]) -> list[dict]:
@@ -248,14 +253,17 @@ class FallbackJudge:
         return self._fallback().rank_candidates(message, intent, candidates)
 
     def warm(self) -> None:
-        return None
+        # laya pays its first load + Core ML compile here; if it fails, hud._warm logs it
+        # and the first real judge() retries before flipping to decider-2b.
+        self.primary.warm()
 
 
 def make_judge():
-    """Jev when a key is configured, otherwise the local decider-2b."""
+    """Local laya-coreml, falling back to decider-2b on failure; decider-2b alone if
+    the laya-coreml package is missing (broken install)."""
     try:
-        import judge_jev
-        if judge_jev.jev_configured():
+        import judge_laya
+        if judge_laya.laya_available():
             return FallbackJudge()
     except Exception:
         pass

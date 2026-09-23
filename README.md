@@ -19,7 +19,7 @@
 
 ## 它能做什么
 
-- **意图 + 风险**：8 类意图零样本 **86.4%**（22 条回归口径），风险 0–9 分级 + 行动建议，本地模型一次前向出全分布
+- **意图 + 风险**：8 类意图零样本判断 + 风险 0–9 分级 + 行动建议；判断层跑本地 laya-coreml（Core ML，无 key、不出网），异常时自动兜底到 decider-2b（其无上下文回归口径为 **86.4%**，22 条）
 - **候选回复**：内置 10 种话术并发生成（每条一稳一放各出 2 条）→ 先上屏 → 本地模型排序后原位重排；换话术立刻按当前消息重新生成
 - **快**：消息一出现判断 + 生成同时起跑，M1 Pro 出意图 ~1.5 s、出候选 ~1.5–2 s（端到端为机制推算口径，以日志实测为准）
 - **YOLO 检测框**（可选，`JEV_BOXES=1` 启动即开、菜单栏可切）：OCR 命中的消息实时框在微信窗口上，对方/我分色 + 置信度
@@ -42,7 +42,8 @@
 
 ```bash
 uv run python src/perception.py                  # 感知层：识别到的消息 + 耗时
-uv run python src/judge.py "这个需求你今天跟一下"  # 单条消息出判断
+uv run python src/judge_laya.py "这个需求你今天跟一下"  # 单条消息出判断（本地 laya-coreml）
+uv run python src/judge.py "这个需求你今天跟一下"  # 单条消息出判断（兜底 decider-2b）
 uv run python src/judge_zh_test.py               # 22 条中文意图回归
 uv run python src/generate.py --check            # 生成层凭据解析
 uv run python -B -m unittest discover -s tests   # 发出消息/异步结果回归（合成 OCR，不读屏）
@@ -51,19 +52,19 @@ uv run python probe/bootstrap_regression.py      # 两种启动入口的离线�
 
 ## 配置
 
-两层、两个 key、**都可以不填**：判断层不填走本地 decider-2b（首次下载约 7 GB）；生成层打包版内置共享 key，不配也能出候选。全部配置在一个 env 文件（**不提供第二种格式**）：
+判断层**完全本地、无需 key**：laya-coreml（Core ML，首次使用下载模型包，之后离线），异常时自动兜底 decider-2b（首次下载约 7 GB）。只有生成层需要 key，打包版内置共享 key，不配也能出候选。全部配置在一个 env 文件（**不提供第二种格式**）：
 
 ### 可视化配置（#18）
 
-点击悬浮窗右上角 **齿轮图标（模型设置）**，或菜单栏 **J → 模型设置…**，可编辑 Jev、OpenAI 兼容、Anthropic 兼容三组密钥、服务地址与模型。
+点击悬浮窗右上角 **齿轮图标（模型设置）**，或菜单栏 **J → 模型设置…**，可编辑 OpenAI 兼容、Anthropic 兼容两组生成密钥、服务地址与模型。判断层在本地运行，不在这窗口里配置。
 设置窗口显示在悬浮窗上方，不会被面板遮挡。**保存后必须退出并重新打开应用**；保存不会切换本次运行的配置。
 
 - 窗口编辑 `$XDG_CONFIG_HOME/jev-jarvis/env`（未设置时为 `~/.config/jev-jarvis/env`），显示具体路径。只修改所编辑服务的字段，保留其他配置、注释和未识别行，文件权限设为 `600`。文件被其他程序修改时拒绝覆盖，需重新打开窗口。
-- 填好地址与密钥，点击「获取模型列表」从该服务的 `/models` 接口动态获取，再下拉选择；不内置模型清单。Jev 按官方 `models[].name` 读取（当前列表为别名，未列出的版本号仍可手填）；OpenAI/Anthropic 按 `data[].id` 读取。接口不支持、失败或返回空列表时明确提示，仍可手填，不自动换模型或服务。空下拉显示「暂无」（仅作提示，不作为模型保存或调用），仍可手填；底部动态提示以蓝色显示进行状态、绿色显示成功、红色显示错误。列表可见不代表一定有生成权限，选定后再测试。
+- 填好地址与密钥，点击「获取模型列表」从该服务的 `/models` 接口动态获取，再下拉选择；不内置模型清单。OpenAI/Anthropic 按 `data[].id` 读取。接口不支持、失败或返回空列表时明确提示，仍可手填，不自动换模型或服务。空下拉显示「暂无」（仅作提示，不作为模型保存或调用），仍可手填；底部动态提示以蓝色显示进行状态、绿色显示成功、红色显示错误。列表可见不代表一定有生成权限，选定后再测试。
 - 「测试连接」使用窗口内**尚未保存**的地址、密钥和模型发起实际调用，仅发送固定问候语，不读取微信内容；可能产生少量服务费用。生成层必须返回非空文字才算成功，不能用 `--check` 的配置解析成功代替连接成功。
 - 密钥掩码显示；窗口仅读取所编辑文件中的值，不把环境变量、项目 `.env` 或内置共享密钥复制进用户文件。各配置页顶部突出显示本次启动正在使用自己的密钥、内置共享密钥或本地判断，以及实际来源；生成页同时标明当前启用的服务，优先级保留在窗口下方。
 - 环境变量优先于用户 env，用户 env 优先于项目 `.env`；生成层 OpenAI 组优先于 Anthropic 组，均未配置才使用内置共享密钥。清空当前文件的密钥不会禁用其他来源中的密钥。由终端或启动器导出的值也显示为「环境变量」。
-- API 格式由密钥组决定：`OPENAI_*` 使用 OpenAI 格式，`ANTHROPIC_*` 使用 Anthropic 格式；自定义地址不需要包含服务名称。Ollama 可填 `http://localhost:11434/v1`、密钥 `ollama`，模型从本地服务获取或手填。Jev 地址沿用判断层约定，不含末尾 `/v1`。
+- API 格式由密钥组决定：`OPENAI_*` 使用 OpenAI 格式，`ANTHROPIC_*` 使用 Anthropic 格式；自定义地址不需要包含服务名称。Ollama 可填 `http://localhost:11434/v1`、密钥 `ollama`，模型从本地服务获取或手填。
 - 钥匙串：不新增钥匙串读写。如果原 env 用 `$(security find-generic-password …)` 等 shell 表达式提供密钥，窗口不执行表达式、不展示其内容，未输入新密钥时保留原行；仍由已有启动器执行。要在窗口测试该服务，需明确输入密钥；保存将用输入值替换原表达式。外部注入的密钥继续遵循环境变量优先级。
 - `JEV_BOXES`、`JEV_TONES`、`OPENAI_EXTRA_BODY` 暂仍通过 env 配置，保存窗口不会改动它们。OpenAI 连接测试沿用当前启动的 `OPENAI_EXTRA_BODY`；完整话术管理等留待后续扩展。
 
@@ -72,8 +73,8 @@ uv run python probe/bootstrap_regression.py      # 两种启动入口的离线�
 ```bash
 mkdir -p ~/.config/jev-jarvis
 cat > ~/.config/jev-jarvis/env <<'ENV'
-# 判断层（可选）：TypeSafe Jev，不填用本地 decider-2b
-export TYPESAFE_API_KEY=""
+# 判断层完全本地（laya-coreml），无需配置；模型包默认 aac6fef/laya-multilingual-coreml
+# export LAYA_COREML_MODEL="aac6fef/laya-multilingual-coreml"
 
 # 生成层：任意 OpenAI 兼容端点
 export OPENAI_API_KEY="sk-你的key"
@@ -88,13 +89,14 @@ chmod 600 ~/.config/jev-jarvis/env
 - **凭据解析以 key 为准**：提供 key 的来源同时决定端点和模型。实测可用：DeepSeek `deepseek-chat`（最快）；智谱 `glm-4-flash`（换 `ANTHROPIC_API_KEY`/`ANTHROPIC_BASE_URL`/`ANTHROPIC_MODEL`，两组都填 OpenAI 组优先）；本地 Ollama `qwen2.5:7b`（完全不出网）
 - **别用 thinking 模型**：思考吃光 `max_tokens`，候选 0 条，面板只报「候选生成失败」——DeepSeek 认准 `deepseek-chat`
 - **自定义话术**：env 加一行 `JEV_TONES`（`|` 分隔、每条「名字=说明」，同名覆盖内置，重启生效），如 `摸鱼大师=像资深摸鱼选手，把活推得漂亮又不失礼`；说明写清「什么语气 + 别变成什么」最管用
-- 自查凭据（不打印完整 key）：`uv run python src/generate.py --check`、`uv run python src/judge_jev.py`
+- 自查凭据（不打印完整 key）：`uv run python src/generate.py --check`
 
 ## 磁盘占用与清理
 
 | 内容 | 位置 | 大小 | 清理 |
 |---|---|---|---|
-| 判断层本地模型 `decider-2b`（不配判断层 key 才会下载，判断+排序共用） | `~/.cache/huggingface/hub/models--Mapika--decider-2b` | ~7 GB | `rm -rf ~/.cache/huggingface/hub/models--Mapika--decider-2b`；之后走本地判断会重新下载 |
+| 判断层主模型 laya-coreml（首次启动判断层时下载，判断+排序共用） | `~/.cache/huggingface/hub/models--aac6fef--laya-multilingual-coreml`（另有 `~/.cache/laya-coreml/` 存编译包） | 见下载后实际占用 | `rm -rf ~/.cache/huggingface/hub/models--aac6fef--laya-multilingual-coreml ~/.cache/laya-coreml`；之后走本地判断会重新下载 |
+| 判断层兜底模型 `decider-2b`（仅兜底触发时才下载，判断+排序共用） | `~/.cache/huggingface/hub/models--Mapika--decider-2b` | ~7 GB | `rm -rf ~/.cache/huggingface/hub/models--Mapika--decider-2b`；之后兜底会重新下载 |
 | Python 运行环境（venv） | `~/Library/Application Support/jev-jarvis/venv` | ~0.7 GB | 删除 .app 不会连带删它，需手动删 |
 
 生成层配 Ollama 的话模型在 Ollama 自己的目录（`~/.ollama`），非本项目下载。
@@ -124,7 +126,7 @@ chmod 600 ~/.config/jev-jarvis/env
 - **贡献前必读**：[CONTRIBUTING.md](CONTRIBUTING.md)——动代码前先在 issue 认领（评论 + assignee），分层自测改哪层跑哪层
 - 配置界面自测：`uv run python -B -m unittest discover -s tests`；macOS 原生窗口与按钮流程：`uv run python -B probe/settings_smoke.py`（临时配置 + 本地测试服务，不使用个人密钥）。
 - 打包 `./packaging/build_app.sh`；发版 `./packaging/release.sh --publish`（干净 worktree 构建 + 解压回验 + gh release）。版本号只有 `pyproject.toml` 一处；有开发者证书可加 `--sign "Developer ID Application: ..."`
-- 架构一句话：进程内抓微信窗口 → Vision OCR（只扫聊天区）→ 本地 decider-2b 出意图/风险 → LLM 并发出候选 → 本地排序 → 悬浮窗 NSPanel。抓窗口不抓屏：微信被挡住也能抓，悬浮窗不污染 OCR
+- 架构一句话：进程内抓微信窗口 → Vision OCR（只扫聊天区）→ 本地 laya-coreml 出意图/风险（异常兜底 decider-2b）→ LLM 并发出候选 → 本地排序 → 悬浮窗 NSPanel。抓窗口不抓屏：微信被挡住也能抓，悬浮窗不污染 OCR
 
 ## 许可与免责
 

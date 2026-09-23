@@ -120,16 +120,6 @@ class SettingsNetwork(unittest.TestCase):
         self.assertEqual(Server.requests[0][0], '/gateway/v4/models')
         self.assertEqual(Server.requests[0][1]['authorization'], 'Bearer draft-key')
 
-    def test_jev_models_follow_typesafe_schema(self):
-        Server.response = {'models': [
-            {'name': 'jev-latest', 'description': 'Stable', 'release_date': '2026-09-15'},
-            {'name': 'jev-preview', 'description': 'Preview', 'release_date': '2026-09-15'},
-        ]}
-        self.assertEqual(config.list_models('TYPESAFE', self.base, 'draft-key'),
-                         ['jev-latest', 'jev-preview'])
-        self.assertEqual(Server.requests[0][0], '/v1/models')
-        self.assertEqual(Server.requests[0][1]['authorization'], 'Bearer draft-key')
-
     def test_anthropic_models_headers(self):
         Server.response = {'data': [{'id': 'model'}]}
         config.list_models('ANTHROPIC', self.base, 'draft-key')
@@ -146,13 +136,10 @@ class SettingsNetwork(unittest.TestCase):
         self.assertFalse(body['enable_thinking'])
         self.assertEqual(headers['authorization'], 'Bearer draft-key')
 
-    def test_anthropic_and_jev_real_response_shape(self):
+    def test_anthropic_real_response_shape(self):
         Server.response = {'content': [{'type': 'text', 'text': '连接成功'}]}
         config.test_connection('ANTHROPIC', self.base, 'key', 'model')
         self.assertEqual(Server.requests[-1][0], '/v1/messages')
-        Server.response = {'answers': {'test': {'choice': '问候'}}}
-        config.test_connection('TYPESAFE', self.base, 'key', 'model')
-        self.assertEqual(Server.requests[-1][0], '/v1/systemone')
 
     def test_empty_and_thinking_are_not_success(self):
         for response in ({}, {'choices': [{'message': {'content': '', 'reasoning_content': 'thinking'}}]}):

@@ -50,7 +50,7 @@ class SettingsController(NSObject):
         self.label(view, "编辑文件：" + str(self.path).replace(str(Path.home()), "~"),
                    24, 476, 710, 34, 12)
         self.tabs = A.NSTabView.alloc().initWithFrame_(NSMakeRect(16, 130, 728, 342))
-        titles = ("判断 · Jev", "生成 · OpenAI 兼容", "生成 · Anthropic 兼容")
+        titles = ("生成 · OpenAI 兼容", "生成 · Anthropic 兼容")
         for index, (prefix, title) in enumerate(zip(config.PREFIXES, titles)):
             item = A.NSTabViewItem.alloc().initWithIdentifier_(prefix)
             item.setLabel_(title)
@@ -87,8 +87,7 @@ class SettingsController(NSObject):
                 self.initial[f"{prefix}_{name}"] = value
                 self.controls.append(field)
             self.fields[prefix] = fields
-            hint = ("Jev 地址不含 /v1；列表接口不可用时，可手填模型。" if prefix == "TYPESAFE"
-                    else "可手填模型。Ollama 地址通常含 /v1，密钥可填 ollama。" if prefix == "OPENAI"
+            hint = ("可手填模型。Ollama 地址通常含 /v1，密钥可填 ollama。" if prefix == "OPENAI"
                     else "使用 Anthropic 消息接口，支持自定义兼容服务地址。")
             self.label(panel, hint, 14, 46, 666, 24, 12)
             for text, action, x in (("获取模型列表", "fetchModels:", 370), ("测试连接", "testConnection:", 532)):
@@ -98,7 +97,7 @@ class SettingsController(NSObject):
             item.setView_(panel)
             self.tabs.addTabViewItem_(item)
         view.addSubview_(self.tabs)
-        self.label(view, "优先级：环境变量 > 用户 env > 项目 .env > 内置；两组生成密钥同时存在时 OpenAI 优先。\n清空此文件的密钥不屏蔽其他来源；切换服务需清除原来源中的优先密钥。", 24, 82, 710, 44, 12)
+        self.label(view, "判断层（意图+风险）在本地运行（laya-coreml），无需密钥，本窗口只配置生成层。\n优先级：环境变量 > 用户 env > 项目 .env > 内置；两组生成密钥同时存在时 OpenAI 优先。", 24, 82, 710, 44, 12)
         self.status = self.label(view, "测试会发送固定问候语，不读取微信内容；可能产生少量服务费用。", 24, 36, 535, 42, 12)
         self.set_status(self.status.stringValue())
         self.save_button = self.button(view, "保存配置", "saveSettings:", 602, 38, 134)
@@ -135,24 +134,19 @@ class SettingsController(NSObject):
 
     @objc.python_method
     def current_source(self, prefix):
-        if prefix == "TYPESAFE":
-            source = userconfig.source_of("TYPESAFE_API_KEY", "JEV_API_KEY")
-            summary = ("本次启动：正在使用自己的 Jev 密钥" if source != "none"
-                       else "本次启动：正在使用本地判断模型，未使用 Jev 密钥")
+        oai = userconfig.provider("OPENAI")
+        anth = userconfig.provider("ANTHROPIC")
+        selected = "OPENAI" if oai["key"] else "ANTHROPIC" if anth["key"] else None
+        if selected:
+            name = "OpenAI 兼容" if selected == "OPENAI" else "Anthropic 兼容"
+            summary = "本次启动：正在使用自己的密钥（" + name + "）"
+            source = (oai if selected == "OPENAI" else anth)["source"]
+            if selected != prefix:
+                source += "；本页服务当前未启用"
         else:
-            oai = userconfig.provider("OPENAI")
-            anth = userconfig.provider("ANTHROPIC")
-            selected = "OPENAI" if oai["key"] else "ANTHROPIC" if anth["key"] else None
-            if selected:
-                name = "OpenAI 兼容" if selected == "OPENAI" else "Anthropic 兼容"
-                summary = "本次启动：正在使用自己的密钥（" + name + "）"
-                source = (oai if selected == "OPENAI" else anth)["source"]
-                if selected != prefix:
-                    source += "；本页服务当前未启用"
-            else:
-                summary = ("本次启动：正在使用内置共享密钥" if builtin.API_KEY
-                           else "本次启动：未配置生成密钥")
-                source = "应用内置" if builtin.API_KEY else "none"
+            summary = ("本次启动：正在使用内置共享密钥" if builtin.API_KEY
+                       else "本次启动：未配置生成密钥")
+            source = "应用内置" if builtin.API_KEY else "none"
         detail = "来源：" + source.replace(str(Path.home()), "~") + "\n以下编辑内容保存后，需重启应用才会生效。"
         return summary, detail
 

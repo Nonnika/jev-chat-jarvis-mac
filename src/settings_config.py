@@ -14,10 +14,9 @@ import urllib.parse
 import userconfig
 from generate import _endpoint, http_post_json, Generator, ThinkingOnlyError
 
-PREFIXES = ("TYPESAFE", "OPENAI", "ANTHROPIC")
+PREFIXES = ("OPENAI", "ANTHROPIC")
 FIELDS = ("API_KEY", "BASE_URL", "MODEL")
 DEFAULTS = {
-    "TYPESAFE": ("https://api.typesafe.ai", "jev-latest"),
     "OPENAI": ("https://api.openai.com/v1", ""),
     "ANTHROPIC": ("https://api.anthropic.com", ""),
 }
@@ -106,11 +105,9 @@ def list_models(prefix: str, base: str, key: str) -> list[str]:
             data = json.loads(resp.read())
         finally:
             conn.close()
-        # TypeSafe documents {models: [{name, description, release_date}]};
-        # OpenAI/Anthropic use {data: [{id, ...}]}. Do not guess alternate schemas.
-        collection, field = ("models", "name") if prefix == "TYPESAFE" else ("data", "id")
-        offered.extend(m[field] for m in data.get(collection, [])
-                       if isinstance(m, dict) and isinstance(m.get(field), str) and m[field])
+        # OpenAI/Anthropic both use {data: [{id, ...}]}. Do not guess alternate schemas.
+        offered.extend(m["id"] for m in data.get("data", [])
+                       if isinstance(m, dict) and isinstance(m.get("id"), str) and m["id"])
         if api != "anthropic" or not data.get("has_more"):
             break
         next_id = data.get("last_id")
@@ -127,15 +124,6 @@ def test_connection(prefix: str, base: str, key: str, model: str, extra: dict | 
     base = validate_endpoint(base)
     if not key or not model.strip():
         raise ValueError("请填写密钥和模型后再测试。")
-    if prefix == "TYPESAFE":
-        # Same endpoint/transport as JevJudge, without loading the local judge model.
-        body = {"model": model, "state": "你好", "questions": {
-            "test": {"type": "choice", "instructions": "请选择问候", "criteria": {"问候": None}}}}
-        data = http_post_json(base + "/v1/systemone", {
-            "content-type": "application/json", "authorization": f"Bearer {key}"}, body, 30)
-        if ((data.get("answers") or {}).get("test") or {}).get("choice") != "问候":
-            raise ValueError("服务返回了响应，但未返回有效判断结果。")
-        return
     api = "anthropic" if prefix == "ANTHROPIC" else "openai"
     body = {"model": model, "max_tokens": 300, "temperature": 0.9,
             "messages": [{"role": "user", "content": "请只回复：连接成功"}]}

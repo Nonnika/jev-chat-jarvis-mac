@@ -1674,9 +1674,9 @@ class HudController(NSObject):
         self._render("message", v["message"], PALETTE["text"])
         self._render("sender", self._context_line(sender, prev), PALETTE["muted"])
         backend = v.get("backend", "")
-        if backend.startswith("local (Jev"):
-            # the backend label is "local (Jev-shaped decider-2b)": take what is inside the
-            # parens without the paren, or the status line reads "... decider-2b)"
+        if backend.startswith("local ("):
+            # the backend label is "local (laya 不可用: ...)": take what is inside the
+            # parens, or the status line reads "... decider-2b)"
             detail = backend.split("(", 1)[1].rstrip(")")
             self._render("status", f"本地兜底 · {detail[:26]}", PALETTE["amber"])
         elif backend:
@@ -1900,15 +1900,14 @@ def main() -> None:
     # First line of every run: which backends are actually in play. Support requests
     # always need it, and it proves the log is live before the first message arrives.
     _base, _key, _model, _src, _api = load_credentials()
-    _log(f"启动 · 判断层 "
-         f"{'TypeSafe Jev' if userconfig.get('TYPESAFE_API_KEY') else '本地 decider-2b'}"
+    _log(f"启动 · 判断层 {getattr(controller.judge, 'label', '本地 decider-2b')}"
          f" · 生成层 {(_base + ' / ' + _model) if _key else '未配置（候选区会是空的）'}"
          + ("（内置默认）" if _src == BUILTIN_SOURCE else "")
          + (" · YOLO 框开" if controller._show_boxes else ""))
     controller._show()
     # Warm the heavy one-off loads (Vision OCR, judge model) while the panel is idle, so
-    # the user's first message pays only steady-state costs. With TypeSafe Jev configured
-    # warm() is a no-op — the network path has nothing to load.
+    # the user's first message pays only steady-state costs. laya-coreml's warm() loads
+    # and compiles the Core ML package; FallbackJudge passes it through.
     threading.Thread(target=controller._warm, daemon=True).start()
     timer = NSTimer.scheduledTimerWithTimeInterval_target_selector_userInfo_repeats_(
         FAST_TICK, controller, "tick:", None, True)
