@@ -15,7 +15,7 @@ import re
 import subprocess
 import tempfile
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 
 import Quartz
@@ -29,11 +29,17 @@ SIDEBAR_X_MAX = 0.30
 # --- content filters ---
 TIMESTAMP_RE = re.compile(r"^\d{1,2}:\d{2}(:\d{2})?$")
 UI_NOISE = (r"折叠聊天", r"共\s*\d+", r"搜索", r"发送", r"拖入文件", r"按住说话",
-            r"语音输入文字", r"按住鼠标", r"按住 说话", r"输入文字",
-            r"^[\w\-\u4e00-\u9fa5]{2,20}[:：].*\.\.\..*[）)]>$")  # folded-chat banner
+            r"语音输入文字", r"按住鼠标", r"按住 说话", r"输入文字")
+FOLDED_CHAT_RE = re.compile(r"^[\w\-\u4e00-\u9fa5]{2,20}[:：].*\.\.\..*[）)]>$")
 MIN_CONF = 0.30
 USERNAME_H_MAX = 0.026   # sender-name lines render smaller than bubble text
 MESSAGE_H_MIN = 0.028
+# Font geometry is in window points, not a percentage of a resizable window.
+# Vision box heights still fluctuate at the same font size: a small box alone
+# cannot prove that text is a sender name.
+USERNAME_H_MAX_PT = 14.0
+MESSAGE_H_MIN_PT = 15.0
+FOLD_LINE_PITCH_MAX = 1.8   # Vision can report a 13 pt box for a 22 pt line pitch
 MIN_TEXT_LEN = 1
 
 
@@ -69,6 +75,7 @@ class Message:
     x: float = 0.0
     w: float = 0.0
     last_y: float = 0.0     # top of the most recent folded line; fold bookkeeping only
+    last_h: float = 0.0     # height of that line, not the whole folded message
 
 
 @dataclass
@@ -112,6 +119,7 @@ def find_wechat_window(previous_wid: int | None = None) -> WindowInfo | None:
     opts = Quartz.kCGWindowListOptionAll | Quartz.kCGWindowListExcludeDesktopElements
     wins = Quartz.CGWindowListCopyWindowInfo(opts, Quartz.kCGNullWindowID)
     best: WindowInfo | None = None
+    sticky: WindowInfo | None = None
     for w in wins:
         owner = w.get("kCGWindowOwnerName") or ""
         if "WeChat" not in owner and "微信" not in owner:
@@ -128,6 +136,8 @@ def find_wechat_window(previous_wid: int | None = None) -> WindowInfo | None:
         # main window: has a title, layer 0-ish, big, roughly window-shaped
         if not title or wi.w < 600 or wi.h < 400:
             continue
+        if previous_wid is not None and wi.wid == previous_wid:
+            sticky = wi
         # only a titled, window-sized window can be the main chat window
         if best is None or (wi.title in main_titles, wi.w * wi.h, wi.wid) > (
                 best.title in main_titles, best.w * best.h, best.wid):
@@ -136,22 +146,11 @@ def find_wechat_window(previous_wid: int | None = None) -> WindowInfo | None:
     # stick with the window we already chose: WeChat 4.x keeps several equally-sized
     # windows around, and re-picking each tick let the target jump between them.
     # Only keep that choice within the same priority; a newly available main wins.
-    if previous_wid is not None and best is not None and best.wid != previous_wid:
-        for w in wins:
-            owner = w.get("kCGWindowOwnerName") or ""
-            if "WeChat" not in owner and "微信" not in owner:
-                continue
-            if int(w.get("kCGWindowNumber") or 0) != previous_wid:
-                continue
-            title = w.get("kCGWindowName") or ""
-            b = dict(w.get("kCGWindowBounds") or {})
-            pw = float(b.get("Width", 0))
-            ph = float(b.get("Height", 0))
-            if (title and pw >= 600 and ph >= 400
-                    and (title in main_titles) == (best.title in main_titles)):
-                return WindowInfo(wid=previous_wid, pid=int(w.get("kCGWindowOwnerPID") or 0),
-                                  title=title, x=float(b.get("X", 0)), y=float(b.get("Y", 0)),
-                                  w=pw, h=ph)
+    # (sticky was collected during the single pass above — the same validity checks
+    # apply, since it came through the same `continue` gates as best.)
+    if (sticky is not None and best is not None and best.wid != previous_wid
+            and (sticky.title in main_titles) == (best.title in main_titles)):
+        return sticky
     return best
 
 
@@ -352,7 +351,15 @@ def _same_frame(a: bytes | None, b: bytes | None) -> bool:
         return False
     if a == b:
         return True
-    return sum(1 for x, y in zip(a, b) if abs(x - y) >= 8) < 6
+    # early exit at the threshold: a frame that really changed is disqualified within
+    # the first few hundred bytes, instead of counting diffs across all 28,672
+    diff = 0
+    for x, y in zip(a, b):
+        if abs(x - y) >= 8:
+            diff += 1
+            if diff >= 6:
+                return False
+    return True
 
 
 # ---------------------------------------------------------------------- extraction
@@ -361,9 +368,15 @@ def _same_frame(a: bytes | None, b: bytes | None) -> bool:
 def _is_noise(b: TextBlock) -> bool:
     if b.conf < MIN_CONF or len(b.text) < MIN_TEXT_LEN:
         return True
-    if TIMESTAMP_RE.match(b.text):
+    body_position = (CHAT_PANE_X_MIN <= b.x and INPUT_AREA_Y_MIN < b.y < TITLE_BAR_Y_MAX
+                     and message_side(b.x, b.w) in {"them", "me"})
+    # “10:30” can be a reply, too. WeChat's timestamp is centered between bubbles.
+    if TIMESTAMP_RE.fullmatch(b.text) and not body_position:
         return True
-    return any(re.search(pat, b.text) for pat in UI_NOISE)
+    # A UI label must occupy the entire block. Substring matching discarded real
+    # chat lines such as “刚才发送的照片”, losing part of a wrapped message.
+    return bool(FOLDED_CHAT_RE.fullmatch(b.text)) or (
+        not body_position and any(re.fullmatch(pat, b.text) for pat in UI_NOISE))
 
 
 def extract_chat_title(blocks: list[TextBlock]) -> str:
@@ -405,9 +418,18 @@ def message_side(x: float, width: float) -> str:
     return "unknown"
 
 
-def extract_messages(blocks: list[TextBlock], max_messages: int = 12) -> list[Message]:
-    """Turn raw OCR blocks into an ordered list of chat messages (bottom = newest)."""
-    chat = [b for b in blocks
+def extract_messages(blocks: list[TextBlock], max_messages: int = 12,
+                     window_height: float | None = None) -> list[Message]:
+    """Turn OCR into messages, using window points when capture geometry is available.
+
+    The normalized thresholds remain for callers without window metadata. Live
+    capture always supplies it, including the Retina subprocess fallback.
+    """
+    has_geometry = window_height is not None and window_height > 0
+    name_max = USERNAME_H_MAX_PT / window_height if has_geometry else USERNAME_H_MAX
+    body_min = MESSAGE_H_MIN_PT / window_height if has_geometry else MESSAGE_H_MIN
+    name_gap = 14.0 / window_height if has_geometry else 0.035
+    chat = [replace(b) for b in blocks
             if b.x >= CHAT_PANE_X_MIN and INPUT_AREA_Y_MIN < b.y < TITLE_BAR_Y_MAX
             and not _is_noise(b)]
     if not chat:
@@ -455,7 +477,14 @@ def extract_messages(blocks: list[TextBlock], max_messages: int = 12) -> list[Me
         aligned = messages and abs(b.x - messages[-1].x) < 0.02
         compatible = messages and (side == messages[-1].side
                                    or "unknown" in (side, messages[-1].side))
-        if aligned and compatible and 0 <= gap < 0.045:
+        fold_gap = (FOLD_LINE_PITCH_MAX * max(messages[-1].last_h, b.h)
+                    if has_geometry and messages else 0.045)
+        sender_header = (messages and messages[-1].side == "them"
+                         and messages[-1].h < name_max and b.h >= body_min
+                         and len(messages[-1].text) <= 16
+                         and len(messages[-1].lines) == 1
+                         and (not has_geometry or gap > fold_gap))
+        if aligned and compatible and not sender_header and 0 <= gap < fold_gap:
             messages[-1].lines.append(b.text)
             messages[-1].text = "\n".join(messages[-1].lines)
             messages[-1].conf = min(messages[-1].conf, b.conf)
@@ -468,10 +497,11 @@ def extract_messages(blocks: list[TextBlock], max_messages: int = 12) -> list[Me
             m.side = message_side(m.x, m.w)
             m.h = bottom - m.y
             m.last_y = b.y
+            m.last_h = b.h
         else:
             messages.append(Message(text=b.text, side=side, y=b.y, conf=b.conf,
                                     h=b.h, lines=[b.text], x=b.x, w=b.w,
-                                    last_y=b.y))
+                                    last_y=b.y, last_h=b.h))
 
     # in group chats WeChat renders the sender name as a short line above the bubble.
     # A wider-than-usual gap after a short line is the tell; that line becomes the
@@ -484,15 +514,16 @@ def extract_messages(blocks: list[TextBlock], max_messages: int = 12) -> list[Me
                 # two independent signals: the name line is set in smaller type and the
                 # line under it is set in message-sized type. Both must agree — a wrong
                 # name is worse than no name.
-                and m.h < USERNAME_H_MAX and nxt.h >= MESSAGE_H_MIN
-                and (nxt.y - m.y) > 0.035):
+                and m.h < name_max and nxt.h >= body_min
+                and (nxt.y - m.y) > max(name_gap,
+                    FOLD_LINE_PITCH_MAX * max(m.last_h, nxt.last_h)
+                    if has_geometry else name_gap)):
             nxt.sender = m.text.strip().rstrip("：:")
             continue
-        # A small-type line with nothing message-sized under it is a stray sender name
-        # (WeChat renders one above every bubble, including image-only messages). It is
-        # never something to judge. Our own bubbles have no sender name above them;
-        # short outgoing text can be just as small, especially in a tall window.
-        if (m.side == "them" and m.h < USERNAME_H_MAX
+        # Keep the legacy filter for metadata-free callers. Live OCR must not delete
+        # an isolated short line by height alone: ordinary body boxes can be just as
+        # small. An ambiguous image-only sender label can therefore remain as context.
+        if (not has_geometry and m.side == "them" and m.h < name_max
                 and len(m.text) <= 16 and "\n" not in m.text):
             continue
         named.append(m)
@@ -557,7 +588,7 @@ def read_conversation(max_messages: int = 12, previous_wid: int | None = None,
             blocks = ocr(png)
             t_ocr = time.perf_counter()
 
-    msgs = extract_messages(blocks, max_messages=max_messages)
+    msgs = extract_messages(blocks, max_messages=max_messages, window_height=win.h)
     return {
         "ok": True,
         "unchanged": False,

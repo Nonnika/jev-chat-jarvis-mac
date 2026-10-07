@@ -2,9 +2,10 @@
 
 Same shape as the TypeSafe Jev API this layer was built around (`state` + typed
 `questions` -> calibrated probabilities, never text), but fully local: a 322M
-multilingual encoder, one forward pass per question, no key and no network. That
-makes it the primary judge, replacing the cloud Jev call; decider-2b stays as the
-on-failure fallback (judge.FallbackJudge).
+multilingual encoder, one forward pass per question, no key and no network. It
+runs as the on-failure fallback under decider-2b (judge.FallbackJudge): on the
+student-chat regression it handles complete formal sentences but goes near-uniform
+on short colloquial messages, which is why it lost the primary seat (2026-09).
 
     import laya_coreml as laya
     agent = laya.load("aac6fef/laya-multilingual-coreml")
@@ -27,8 +28,9 @@ import json
 import threading
 import time
 
+import relationship
 import userconfig
-from judge import ACTION_MAP, INTENTS, RISK_LEVELS
+from judge import ACTION_MAP, INTENTS, intent_question, RISK_LEVELS, RISK_QUESTION
 
 DEFAULT_MODEL = "aac6fef/laya-multilingual-coreml"
 
@@ -51,8 +53,9 @@ class LayaJudge:
 
     name = "laya-coreml"
 
-    def __init__(self, model: str | None = None):
+    def __init__(self, model: str | None = None, scene: str | None = None):
         self.model = model or laya_model()
+        self.scene = scene if scene in userconfig.CHAT_SCENES else userconfig.chat_scene()
         self._agent = None
         # Same shape as judge.Judge's load lock: warm() and the first real message can
         # both get here at once, and the loser waits instead of loading the model twice.
@@ -72,10 +75,10 @@ class LayaJudge:
         # One predict call, two forwards (batch 1 per question, insertion order).
         result = self._agent.predict(state, {
             "intent": {"type": "choice",
-                       "instructions": "这句话的真实意图是什么？",
+                       "instructions": intent_question(self.scene),
                        "criteria": INTENTS},
             "risk": {"type": "score",
-                     "instructions": "如果直接回复这句话，风险有多大？",
+                     "instructions": RISK_QUESTION,
                      "criteria": RISK_LEVELS},
         })
         answers = result.get("answers") or {}
@@ -103,6 +106,7 @@ class LayaJudge:
             "risk_probs": risk_ans.get("probabilities") or {},
             "actions": ACTION_MAP.get(intent, []),
             "message": message,
+            "relationship": relationship.analyze(message, context),
             "backend": f"laya-coreml/{self.model}",
         }
 
@@ -136,7 +140,7 @@ if __name__ == "__main__":
     import sys
 
     j = LayaJudge()
-    msg = sys.argv[1] if len(sys.argv) > 1 else "这个需求你今天跟一下"
+    msg = sys.argv[1] if len(sys.argv) > 1 else "明天早上能帮我带份早饭不"
     t0 = time.perf_counter()
     j._load()
     load_s = time.perf_counter() - t0

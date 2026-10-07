@@ -27,9 +27,10 @@ import os
 import time
 import urllib.error
 
+import relationship
 import userconfig
 from generate import http_post_json
-from judge import ACTION_MAP, INTENTS, RISK_LEVELS
+from judge import ACTION_MAP, INTENTS, INTENT_QUESTION, RISK_LEVELS, RISK_QUESTION
 
 DEFAULT_BASE = "https://api.typesafe.ai"
 DEFAULT_MODEL = "jev-latest"
@@ -61,10 +62,10 @@ class JevJudge:
             "state": state,
             "questions": {
                 "intent": {"type": "choice",
-                           "instructions": "这句话的真实意图是什么？",
+                           "instructions": INTENT_QUESTION,
                            "criteria": INTENTS},
                 "risk": {"type": "score",
-                         "instructions": "如果直接回复这句话，风险有多大？",
+                         "instructions": RISK_QUESTION,
                          "criteria": RISK_LEVELS},
             },
         }
@@ -94,6 +95,7 @@ class JevJudge:
             "risk_probs": risk_ans.get("probabilities") or {},
             "actions": ACTION_MAP.get(intent, []),
             "message": message,
+            "relationship": relationship.analyze(message, context),
             "backend": f"jev/{self.model}",
         }
 

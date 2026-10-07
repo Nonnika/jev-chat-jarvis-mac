@@ -63,6 +63,8 @@ class OutgoingTests(unittest.TestCase):
         h._show = Mock()
         h._render = Mock()
         h._clear_candidates = Mock()
+        h._set_cand_header = Mock()
+        h._set_pending = Mock()
         h.rows = {'cand_header': Mock()}
         h._slot_active = lambda _: True
         h._payload_current = lambda _: True
@@ -217,7 +219,7 @@ class OutgoingTests(unittest.TestCase):
         self.h._prejudge_event.wait.side_effect = [None, Finished()]
         def judge_then_clear(*args, **kwargs):
             self.read([])
-            return {'intent': '约会议', 'confidence': 1, 'risk': 1}
+            return {'intent': '约时间', 'confidence': 1, 'risk': 1}
         self.h.judge.judge.side_effect = judge_then_clear
         with self.assertRaises(Finished):
             self.h._prejudge_loop()

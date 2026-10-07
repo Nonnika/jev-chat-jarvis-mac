@@ -47,6 +47,7 @@ from AppKit import (
     NSPasteboard,
     NSPasteboardTypeString,
     NSPopUpButton,
+    NSProgressIndicator,
     NSScreen,
     NSTextField,
     NSView,
@@ -72,8 +73,9 @@ from judge import make_judge  # noqa: E402
 from generate import BUILTIN_SOURCE, Generator, load_credentials  # noqa: E402
 import styles  # noqa: E402
 import fill  # noqa: E402
+import power  # noqa: E402
 
-PANEL_W, PANEL_H = 360, 614   # tall enough for 3-line candidates + the chat name row
+PANEL_W, PANEL_H = 360, 670   # tall enough for 3-line candidates + chat name + recognized turns
 COLLAPSED_H = 96              # height when the panel is rolled up
 # The tick timer fires at FAST_TICK; a read only runs when due. A quiet screen (fingerprint
 # match ⇒ no OCR) re-checks every FAST_TICK — a new message surfaces within 0.25 s instead
@@ -91,6 +93,7 @@ STABLE_READS = 3         # … but only after this many consecutive unchanged re
 MIN_GAP_S = 2.0          # never restart analysis faster than this
 CONTEXT_TURNS = 4        # recent turns the generation half sees
 JUDGE_TURNS = 2          # recent turns the judge half sees: shorter prompt, faster forward
+POWER_INTERVAL_S = 1.0   # wattage refresh; a sample costs ~0.4 ms (src/power.py)
 
 
 # ---------------------------------------------------------------- palette
@@ -222,6 +225,13 @@ class HudController(NSObject):
         self._dds: list = []
         self._dd_boxes: list = []       # the flat fields the dropdowns are drawn into
         self._group_boxes: list = []    # translucent surfaces behind active tone groups
+        # per-slot "candidates in flight" markers: while a group's generation runs, its
+        # reserved row area would otherwise be a blank card — the spinner+line placed
+        # there says what is happening. Slots enter the set on 等待判断/生成中/换话术 and
+        # leave it on the first streamed line or the full payload landing.
+        self._group_placeholders: list = []
+        self._pending_slots: set = set()
+        self._cand_busy = False         # mirrors the cand_header spinner's on/off
         self._rows: list = []
         self._fixed: list = []          # (control, x, dy_from_top, w, h) — the rows above
         self._detail_views: list = []   # non-data chrome hidden with the expanded details
@@ -263,6 +273,11 @@ class HudController(NSObject):
         threading.Thread(target=self._pregen_loop, daemon=True).start()
         self._burst_left = BURST_READS       # short-cadence reads left after a change
         self._stable_n = 0                   # consecutive unchanged reads since last change
+        # 功耗读数: the meter is lazy (no hardware touched until the first tick), throttled to
+        # POWER_INTERVAL_S, and never raises — see src/power.py for what is readable without
+        # root and why the CPU figure is absent rather than guessed.
+        self._power = power.PowerMeter(POWER_INTERVAL_S)
+        self._power_text = ""
         self._collapsed = False
         self._expanded_h = None       # full height, captured the first time we collapse
         self._paused = False
@@ -335,74 +350,98 @@ class HudController(NSObject):
 
         # Decorative surfaces are fixed; every string still comes from the existing rows.
         for surface, x, top, w, h in (
-            (self._make_surface(12, PALETTE["surface"]), 14, 54, PANEL_W - 28, 62),
-            (self._make_surface(12, PALETTE["surface"]), 14, 124, PANEL_W - 28, 72),
-            (self._make_surface(10, PALETTE["surface"]), 14, 204, PANEL_W - 28, 34),
+            (self._make_surface(12, PALETTE["surface"]), 14, 54, PANEL_W - 28, 118),
+            (self._make_surface(12, PALETTE["surface"]), 14, 180, PANEL_W - 28, 72),
+            (self._make_surface(10, PALETTE["surface"]), 14, 260, PANEL_W - 28, 34),
         ):
             view.addSubview_(surface)
             self._fixed.append((surface, x, top, w, h))
             self._detail_views.append(surface)
+            if top == 54:
+                self._message_surface = surface
 
         # Summary separators and static labels carry no model data; they only make the
         # existing intent/risk/action fields scan like the approved design.
         for x in (150, 260):
             divider = self._make_surface(0, PALETTE["edge"])
             view.addSubview_(divider)
-            self._fixed.append((divider, x, 136, 1, 46))
+            self._fixed.append((divider, x, 192, 1, 46))
             self._detail_views.append(divider)
 
         action_label = self._make_label(0, 0, 58, 16, size=11,
                                         color=PALETTE["text"], bold=True)
         action_label.setStringValue_("具体行动")
         view.addSubview_(action_label)
-        self._fixed.append((action_label, 26, 213, 58, 16))
+        self._fixed.append((action_label, 26, 267, 58, 16))
         self._detail_views.append(action_label)
 
         risk_title = self._make_label(0, 0, 64, 14, size=9, color=PALETTE["muted"])
         risk_title.setStringValue_("风险等级")
         view.addSubview_(risk_title)
-        self._fixed.append((risk_title, 272, 132, 64, 14))
+        self._fixed.append((risk_title, 272, 188, 64, 14))
         self._detail_views.append(risk_title)
         for i, (title, color) in enumerate((
             ("低", PALETTE["green"]), ("中", PALETTE["amber"]), ("高", PALETTE["red"]))):
             dot = self._make_surface(4, color.colorWithAlphaComponent_(0.28))
             view.addSubview_(dot)
-            self._fixed.append((dot, 272 + i * 24, 160, 8, 8))
+            self._fixed.append((dot, 272 + i * 24, 216, 8, 8))
             self._detail_views.append(dot)
             self._risk_dots.append(dot)
             label = self._make_label(0, 0, 12, 12, size=9, color=PALETTE["muted"])
             label.setStringValue_(title)
             view.addSubview_(label)
-            self._fixed.append((label, 282 + i * 24, 158, 12, 12))
+            self._fixed.append((label, 282 + i * 24, 214, 12, 12))
             self._detail_views.append(label)
 
         for key, x, top, w, h, size, color, bold in (
-            ("chat", 20, 14, PANEL_W - 76, 20, 15, PALETTE["green"], True),
+            # The wattage shares the chat-name row, right-aligned against the gear it sits
+            # next to. "chat" gives up the room: titles longer than this were already being
+            # clipped, and 功耗 — 3.2 W is worth more to the reader than two extra glyphs of
+            # group name. The readout is deliberately NOT in _detail_views, so it survives
+            # collapsing — a 96 px strip that still answers "how much is this machine pulling"
+            # is the whole point of putting it up here.
+            ("chat", 20, 14, 200, 20, 15, PALETTE["green"], True),
+            ("power", 228, 15, 86, 16, 10, PALETTE["muted"], False),
             ("status", 20, 36, PANEL_W - 40, 14, 10, PALETTE["muted"], False),
             ("message", 26, 62, PANEL_W - 52, 30, 14, PALETTE["text"], False),
             ("sender", 26, 96, PANEL_W - 52, 14, 10, PALETTE["muted"], False),
-            ("intent", 26, 136, 116, 26, 20, PALETTE["text"], True),
-            ("confidence", 26, 166, 116, 16, 11, PALETTE["muted"], False),
-            ("risk", 164, 137, 92, 24, 14, PALETTE["green"], True),
-            ("actions", 94, 213, 236, 16, 11, PALETTE["text"], False),
+            ("recognized", 26, 114, PANEL_W - 52, 54, 10, PALETTE["muted"], False),
+            ("intent", 26, 192, 116, 26, 20, PALETTE["text"], True),
+            ("confidence", 26, 222, 116, 16, 11, PALETTE["muted"], False),
+            ("risk", 164, 193, 92, 24, 14, PALETTE["green"], True),
+            ("actions", 94, 267, 236, 16, 11, PALETTE["text"], False),
         ):
             tf = self._make_label(x, 0, w, h, size=size, color=color, bold=bold)
             if key in {"message", "actions"}:
                 tf.cell().setWraps_(True)
+            if key == "message":
+                tf.cell().setLineBreakMode_(AppKit.NSLineBreakByWordWrapping)
+                if hasattr(tf.cell(), "setMaximumNumberOfLines_"):
+                    tf.cell().setMaximumNumberOfLines_(0)
+            if key == "power":
+                tf.setAlignment_(AppKit.NSTextAlignmentRight)
+                tf.setToolTip_("功耗：电池放电时显示整机功耗；插电时显示充电功率或 GPU 能量")
             view.addSubview_(tf)
             self.rows[key] = tf
             self._fixed.append((tf, x, top, w, h))
-            if key not in {"chat", "status"}:
+            if key not in {"chat", "status", "power"}:
                 self._detail_views.append(tf)
 
-        header = self._make_label(18, 0, PANEL_W - 36, 18,
+        # The busy spinner marks every header state that still has work in flight
+        # (等待判断 / 生成中 / 排序中): a static label alone reads as "stuck" for the
+        # second or two those take. It sits left of the text it belongs to.
+        self._cand_spin = self._make_spin()
+        view.addSubview_(self._cand_spin)
+        self._fixed.append((self._cand_spin, 18, 308, 16, 16))
+        self._detail_views.append(self._cand_spin)
+        header = self._make_label(38, 0, PANEL_W - 56, 18,
                                   size=12, color=PALETTE["muted"], bold=True)
         header.setStringValue_("候选回复（按合适度排序）")
         view.addSubview_(header)
         self.rows["cand_header"] = header
-        self._fixed.append((header, 18, 250, PANEL_W - 36, 18))
+        self._fixed.append((header, 38, 306, PANEL_W - 56, 18))
         self._detail_views.append(header)
-        self._group_top = 274
+        self._group_top = 330
 
         # ---- 话术 groups: each dropdown heads a group and its candidates sit underneath,
         # so the tone is labelled by the thing that selects it. Every group's controls exist
@@ -433,6 +472,14 @@ class HudController(NSObject):
             pop.setAction_("toneChanged:")
             view.addSubview_(pop)
             self._dds.append(pop)
+
+            ph_spin = self._make_spin()
+            ph_label = self._make_label(0, 0, 120, 14, size=10,
+                                        color=PALETTE["muted"])
+            ph_label.setStringValue_("正在生成候选…")
+            view.addSubview_(ph_spin)
+            view.addSubview_(ph_label)
+            self._group_placeholders.append((ph_spin, ph_label))
 
             slot_rows = []
             for row in range(styles.PER_TONE):
@@ -510,11 +557,21 @@ class HudController(NSObject):
         neither a dropdown's worth of rows nor its candidates, which is what removes the dead
         space a fixed-height panel left in the middle.
         """
-        dy = self._group_top
+        message_h = self._text_height(self.rows["message"], PANEL_W - 52, 30)
+        message_extra = message_h - 30
+        dy = self._group_top + message_extra
         placements = []          # (control, x, dy_from_top, w, h)
         for slot in range(styles.MAX_SLOTS):
             active = self._slot_active(slot)
-            self._group_boxes[slot].setHidden_(not active)
+            self._group_boxes[slot].setHidden_((not active) or self._collapsed)
+            pending = active and not self._collapsed and slot in self._pending_slots
+            ph_spin, ph_label = self._group_placeholders[slot]
+            ph_spin.setHidden_(not pending)
+            ph_label.setHidden_(not pending)
+            if pending:
+                ph_spin.startAnimation_(None)
+            else:
+                ph_spin.stopAnimation_(None)
             group_top = dy
             selector_top = dy + (GROUP_PAD_Y if active else 0)
             placements.append((self._dd_boxes[slot], TONE_DD_X, selector_top,
@@ -524,6 +581,7 @@ class HudController(NSObject):
             dy = selector_top + TONE_DD_H
             if active:
                 dy += TONE_DD_GAP
+            rows_top = dy
             for row in range(styles.PER_TONE):
                 r = self._rows[slot][row]
                 controls = self._row_controls(slot, row)
@@ -553,17 +611,37 @@ class HudController(NSObject):
                     for c in controls:
                         c.setHidden_(True)
             if active:
+                rows_bottom = dy
                 dy += GROUP_PAD_Y
                 placements.append((self._group_boxes[slot], 14, group_top,
                                    PANEL_W - 28, dy - group_top))
+                if pending:
+                    # centered in the reserved row area: the space is deliberately kept
+                    # (candidates arrive into it without a jump), it just must not be blank
+                    ph_top = rows_top + (rows_bottom - rows_top - 16) / 2
+                    placements.append((ph_spin, 110, ph_top, 16, 16))
+                    placements.append((ph_label, 130, ph_top + 1, 120, 14))
             if slot < styles.MAX_SLOTS - 1:
                 dy += GROUP_GAP
 
         content_h = dy + BOTTOM_PAD
         view = self.panel.contentView()
         view.setFrameSize_(NSMakeSize(PANEL_W, content_h))
-        for ctrl, x, top, w, h in placements + self._fixed:
+        fixed = []
+        for ctrl, x, top, w, h in self._fixed:
+            if ctrl is self.rows["message"] or ctrl is self._message_surface:
+                h += message_extra
+            elif top >= 96:
+                top += message_extra
+            fixed.append((ctrl, x, top, w, h))
+        for ctrl, x, top, w, h in placements + fixed:
             ctrl.setFrame_(NSMakeRect(x, content_h - top - h, w, h))
+
+        if self._collapsed:
+            # a late candidate landing while the panel is rolled up used to grow the
+            # window back to full height (rows stayed hidden — a tall empty strip);
+            # place the controls, but the strip keeps its size until it is expanded
+            return
 
         # resize the window with its TOP edge pinned: growing downwards is what the eye
         # expects here, and _position_near() anchors the panel to WeChat's top anyway
@@ -682,18 +760,67 @@ class HudController(NSObject):
         return btn
 
     @objc.python_method
+    def _make_spin(self) -> NSProgressIndicator:
+        """Small native spinner: starts hidden, shows itself only while animating."""
+        spin = NSProgressIndicator.alloc().initWithFrame_(NSMakeRect(0, 0, 16, 16))
+        spin.setStyle_(AppKit.NSProgressIndicatorStyleSpinning)
+        spin.setControlSize_(AppKit.NSSmallControlSize)
+        spin.setDisplayedWhenStopped_(False)
+        spin.setHidden_(True)
+        return spin
+
+    @objc.python_method
+    def _active_slots(self) -> list[int]:
+        return [s for s in range(styles.MAX_SLOTS) if self._slot_active(s)]
+
+    @objc.python_method
+    def _set_pending(self, slots) -> None:
+        """Mark which tone groups are waiting for candidates, then re-place the panel."""
+        self._pending_slots = set(slots)
+        self._relayout()
+
+    @objc.python_method
+    def _set_cand_header(self, text: str, busy: bool = False) -> None:
+        """Header text plus its spinner, always set together so they cannot disagree."""
+        self._cand_busy = busy
+        self.rows["cand_header"].setStringValue_(text)
+        if busy:
+            self._cand_spin.startAnimation_(None)
+            self._cand_spin.setHidden_(False)
+        else:
+            self._cand_spin.stopAnimation_(None)
+            self._cand_spin.setHidden_(True)
+
+    @objc.python_method
     def _show(self):
         if not self.panel.isVisible():
             self.panel.orderFrontRegardless()
 
     @objc.python_method
-    def _context_line(self, sender, prev: str) -> str:
-        parts = []
-        if sender:
-            parts.append(f"来自 {sender}")
-        if prev:
-            parts.append(f"上文：{prev[:26]}")
-        return " · ".join(parts)
+    def _sender_line(self, sender: str, rel: dict | None = None) -> str:
+        line = f"来自 {sender}" if sender else ""
+        label = (rel or {}).get("label", "")
+        if label and label not in ("信息不足", "中性闲聊"):
+            line = f"{line} · 关系信号：{label}" if line else f"关系信号：{label}"
+        return line
+
+    @objc.python_method
+    def _render_sender(self, sender: str, rel: dict | None = None) -> None:
+        """Render sender text plus the relationship hint; details go in the tooltip."""
+        self._render("sender", self._sender_line(sender, rel), PALETTE["muted"])
+        tip = ""
+        if rel:
+            evidence = rel.get("evidence") or {}
+            tip = "；".join(
+                cue + ("（" + " / ".join(evidence[cue][:2]) + "）" if evidence.get(cue) else "")
+                for cue in rel.get("cues") or [])
+            if rel.get("read"):
+                tip = (tip + "\n" if tip else "") + rel["read"]
+            if rel.get("disclaimer"):
+                tip = (tip + "\n" if tip else "") + rel["disclaimer"]
+        row = self.rows.get("sender")
+        if row is not None:
+            row.setToolTip_(tip or None)
 
     @objc.python_method
     def _render(self, key: str, text: str, color: NSColor | None = None):
@@ -701,20 +828,28 @@ class HudController(NSObject):
         tf.setStringValue_(text)
         if color is not None:
             tf.setTextColor_(color)
+        if key == "message":
+            tf.setToolTip_(text or None)
+            if not self._collapsed:
+                self._relayout()
 
     @objc.python_method
     def _candidate_text_height(self, field: NSTextField) -> float:
         """Measure the full rendered reply so layout never relies on a character cutoff."""
+        return self._text_height(field, CAND_TEXT_W, 18)
+
+    @objc.python_method
+    def _text_height(self, field: NSTextField, width: float, minimum: float) -> float:
         text = field.stringValue()
         if not text:
-            return 18
+            return minimum
         attributed = NSAttributedString.alloc().initWithString_attributes_(
             text, {NSFontAttributeName: field.font()})
         options = (AppKit.NSStringDrawingUsesLineFragmentOrigin
                    | AppKit.NSStringDrawingUsesFontLeading)
         bounds = attributed.boundingRectWithSize_options_(
-            NSMakeSize(CAND_TEXT_W, 10_000), options)
-        return max(18, float(int(bounds.size.height + 4.999)))
+            NSMakeSize(width, 10_000), options)
+        return max(minimum, float(int(bounds.size.height + 4.999)))
 
     @objc.python_method
     def _set_progress(self, slot: int, row: int, value: float | None):
@@ -822,13 +957,19 @@ class HudController(NSObject):
         Uses global Cocoa coordinates throughout. NSScreen.mainScreen() must NOT be used:
         it follows whichever display holds the key window, so relying on it made the panel
         hop ~1369 px between displays a few times a minute.
+
+        Screens are enumerated once per call — this runs on the drawing thread at read
+        cadence, and each NSScreen.screens() is a WindowServer round-trip.
         """
-        flip = self._display_height()
+        screens = list(NSScreen.screens())
+        origin00 = next((s for s in screens
+                         if s.frame().origin.x == 0 and s.frame().origin.y == 0), None)
+        # the flip constant, from the same screens list (see _display_height for why it
+        # is the (0,0) display's height and not the target screen's)
+        flip = (origin00 or NSScreen.mainScreen()).frame().size.height
+        primary = origin00 or screens[0]
         panel_h = self.panel.frame().size.height or PANEL_H
         panel_w = self.panel.frame().size.width or PANEL_W
-        screens = list(NSScreen.screens())
-        primary = next((s for s in screens
-                        if s.frame().origin.x == 0 and s.frame().origin.y == 0), screens[0])
 
         if win:
             # CGWindow bounds are top-left origin global pixels -> Cocoa bottom-left
@@ -933,7 +1074,8 @@ class HudController(NSObject):
             self._render("status", "没选话术 · 至少选一个", PALETTE["amber"])
             return
         self._render("status", f"换话术中…（{'、'.join(active)}）", PALETTE["muted"])
-        self.rows["cand_header"].setStringValue_("候选回复 · 生成中…")
+        self._set_cand_header("候选回复 · 生成中…", busy=True)
+        self._set_pending(self._active_slots())
         threading.Thread(target=self._reply_task,
                          args=(self._reply_epoch, self._regen_work,
                                text, self._last_intent, list(self.slot_tones)),
@@ -1038,14 +1180,17 @@ class HudController(NSObject):
         return all(self.slot_tones[slot] == tone for slot, tone, _items in payload)
 
     @objc.python_method
-    def _cand_header(self, payload) -> str:
+    def _cand_header(self, payload) -> tuple[str, bool]:
         pending = any(it["prob"] is None for _s, _t, items in payload for it in items)
-        return "候选回复 · 排序中…" if pending else "候选回复（按合适度排序）"
+        return (("候选回复 · 排序中…", True) if pending
+                else ("候选回复（按合适度排序）", False))
 
     def applyTones_(self, payload):
         if not self._payload_current(payload):
             return
-        self.rows["cand_header"].setStringValue_(self._cand_header(payload))
+        for slot, _tone, _items in payload:
+            self._pending_slots.discard(slot)
+        self._set_cand_header(*self._cand_header(payload))
         total = sum(len(items) for _s, _t, items in payload)
         self._render("status", f"已换话术 · {total} 条", PALETTE["muted"])
         self._render_groups(payload)
@@ -1067,13 +1212,15 @@ class HudController(NSObject):
             self._render("status", "已暂停 · 不再读屏", PALETTE["amber"])
             self._render("message", "", PALETTE["text"])
             self._render("sender", "", PALETTE["muted"])
+            self._render("recognized", "", PALETTE["muted"])
             self._render("intent", "—", PALETTE["muted"])
             self._render("confidence", "", PALETTE["muted"])
             self._render("risk", "", PALETTE["muted"])
             if hasattr(self, "_risk_dots"):
                 self._set_risk_scale(None)
             self._render("actions", "", PALETTE["text"])
-            self.rows["cand_header"].setStringValue_("")
+            self._set_cand_header("")
+            self._set_pending([])
             self._clear_candidates()
         else:
             self._prejudge_result = None
@@ -1107,6 +1254,9 @@ class HudController(NSObject):
             self._dds[slot].setHidden_(collapsed)
             self._dd_boxes[slot].setHidden_(collapsed)
             self._group_boxes[slot].setHidden_(collapsed or not self._slot_active(slot))
+            ph_spin, ph_label = self._group_placeholders[slot]
+            ph_spin.setHidden_(collapsed)
+            ph_label.setHidden_(collapsed)
             for row in range(styles.PER_TONE):
                 has = self.cand_texts[slot * styles.PER_TONE + row] is not None
                 for c in self._row_controls(slot, row):
@@ -1115,6 +1265,11 @@ class HudController(NSObject):
             # re-expanding puts every control back where _relayout() wants it, and re-hides
             # the slots that are switched off — the collapse above cannot know that
             self._relayout()
+            # _relayout() restores the group placeholders; the header spinner is not its
+            # business, so put it back per the last _set_cand_header state
+            self._cand_spin.setHidden_(not self._cand_busy)
+            if self._cand_busy:
+                self._cand_spin.startAnimation_(None)
             self._last_origin = None      # let the next tick re-dock cleanly
             return
 
@@ -1125,14 +1280,41 @@ class HudController(NSObject):
         self.panel.setFrame_display_(
             NSMakeRect(rect.origin.x, rect.origin.y + (rect.size.height - new_h),
                        rect.size.width, new_h), True)
+        # Shrinking the window shrinks the content view, but the surviving rows keep their
+        # full-height coordinates (y≈640) and fall outside the 68 pt strip — the "rolled-up
+        # panel shows chat name + status + wattage" this feature promises used to be an
+        # empty frosted bar. Re-place exactly those survivors into the strip; expanding
+        # re-runs _relayout() against the full height, so nothing else is needed.
+        surviving = (self.settings_button, self.rows["chat"], self.rows["status"],
+                     self.rows["power"])
+        strip_h = new_h - self._title_h
+        for ctrl, x, top, w, h in self._fixed:
+            if ctrl in surviving:
+                ctrl.setFrame_(NSMakeRect(x, strip_h - top - h, w, h))
         self._last_origin = None      # let the next tick re-dock cleanly
 
     # --------------------------------------------------------------- loop
     def tick_(self, timer):
+        # Before the gates on purpose: the wattage keeps updating while the panel is paused
+        # or collapsed. It reads IOReport/the IORegistry — never the screen — costs ~0.4 ms
+        # once a second, and reports nothing until it has something honest to show.
+        self._update_power()
         if self._paused or self._busy or time.time() < self._next_read_ts:
             return  # paused, a previous read is still running, or not due yet
         self._busy = True
         threading.Thread(target=self._work, daemon=True).start()
+
+    @objc.python_method
+    def _update_power(self):
+        out = self._power.sample()
+        if not out:
+            return                      # not due yet, or nothing readable on this machine
+        text, tip = out
+        if text == self._power_text:
+            return                      # AppKit writes are not free; the value only moves ~1 Hz
+        self._power_text = text
+        self._render("power", text, PALETTE["muted"])
+        self.rows["power"].setToolTip_(tip)
 
     @objc.python_method
     def _work(self):
@@ -1271,7 +1453,8 @@ class HudController(NSObject):
             self._pregen_result = None
             self._pregen_event.set()
             # keep the previous verdict readable; just badge that something new landed
-            self._push("applyIncoming:", (newest.text, newest.sender, prev_text))
+            self._push("applyIncoming:", (newest.text, newest.sender, prev_text,
+                                          self._context_text(msgs, newest, preview=True)))
 
         # Anti-flood, two signals: the blind wait (SETTLE_S, unchanged upper bound) or a
         # content-stability early open — the pane went quiet for STABLE_READS consecutive
@@ -1295,13 +1478,15 @@ class HudController(NSObject):
                 # Judgment already ran inside the settle window; go straight to the
                 # verdict on screen and start only the generation half.
                 _log(f"停稳 · 用预判结论上屏 · 这条消息出现到现在 {now - self.last_change_ts:.1f}s")
-                self._push("applyJudgment:", (pr[1], pr[2], pr[3]))
+                self._push("applyJudgment:", (pr[1], pr[2], pr[3],
+                                              self._context_text(msgs, newest, preview=True)))
                 threading.Thread(target=self._reply_task,
                                  args=(self._reply_epoch, self._run_generation,
                                        newest, msgs, pr[1]), daemon=True).start()
             else:
                 _log(f"开始分析 · 这条消息出现到现在 {now - self.last_change_ts:.1f}s")
-                self._push("applyPending:", (newest.text, newest.sender, prev_text))
+                self._push("applyPending:", (newest.text, newest.sender, prev_text,
+                                             self._context_text(msgs, newest, preview=True)))
                 # off the tick path on purpose: judge+generate+rank takes over a second, and
                 # while it runs the loop must keep reading — a message landing mid-analysis
                 # used to wait the whole analysis out before anyone even saw it
@@ -1485,7 +1670,8 @@ class HudController(NSObject):
             self._analyzing = False
 
     @objc.python_method
-    def _context_text(self, msgs, newest, turns: int = CONTEXT_TURNS) -> str | None:
+    def _context_text(self, msgs, newest, turns: int = CONTEXT_TURNS,
+                      preview: bool = False) -> str | None:
         """The last few turns, each prefixed with who said it — shared by both halves.
 
         The names are the point. The judge used to receive a jumble of lines with no
@@ -1500,12 +1686,16 @@ class HudController(NSObject):
         The message under judgment is excluded **by identity**, not by position: `newest` is
         the last message from the other side, which is not the same as the last element of
         `msgs` (my own replies come after it).
+
+        `preview=True` is the panel view of the same turns: a folded turn's line breaks
+        become " / " so each turn stays one visual line in the recognized-context field.
         """
         prior = [m for m in msgs if m is not newest][-turns:]
         if not prior:
             return None
+        who = lambda m: m.sender or {'me': '我', 'them': '对方'}.get(m.side, '方向未确认')
         return "\n".join(
-            f"{m.sender or {'me': '我', 'them': '对方'}.get(m.side, '方向未确认')}: {m.text}"
+            f"{who(m)}: " + (m.text.replace("\n", " / ") if preview else m.text)
             for m in prior)
 
     @objc.python_method
@@ -1541,7 +1731,8 @@ class HudController(NSObject):
                 _log(f"判断 {ms:.0f}ms → {verdict.get('intent', '?')}"
                      f" 把握 {verdict.get('confidence', 0):.0%}"
                      f" 风险 {verdict.get('risk', '?')}{note}")
-                self._push("applyJudgment:", (verdict, newest.sender, prev_text))
+                self._push("applyJudgment:", (verdict, newest.sender, prev_text,
+                                              self._context_text(msgs, newest, preview=True)))
             except Exception as e:
                 _log(f"判断失败 {type(e).__name__}: {str(e)[:60]}")
                 self._push("applyError:", f"判断失败: {type(e).__name__}: {str(e)[:40]}")
@@ -1634,11 +1825,16 @@ class HudController(NSObject):
         self._last_risk = 0.0
         self._clear_candidates()
         self._stream_rows = {}
-        for key in ("message", "sender", "intent", "confidence", "risk", "actions"):
+        for key in ("message", "sender", "recognized", "intent", "confidence", "risk",
+                    "actions"):
             self._render(key, "", PALETTE["muted"])
+        row = self.rows.get("sender")
+        if row is not None:
+            row.setToolTip_(None)
         if hasattr(self, "_risk_dots"):
             self._set_risk_scale(None)
-        self.rows["cand_header"].setStringValue_("候选回复")
+        self._set_cand_header("候选回复")
+        self._set_pending([])
         self._render("status", "等待可确认的对方消息…", PALETTE["muted"])
 
     # --- main-thread callbacks (AppKit is not thread safe)
@@ -1649,34 +1845,38 @@ class HudController(NSObject):
     def applyIncoming_(self, payload):
         # a new message landed but we are not analysing yet (burst in progress):
         # keep the previous verdict visible, just badge it
-        text, sender, prev = payload
+        text, sender, _prev, recognized = payload
         self._show()
         self._render("status", "有新消息 · 等消息停稳…", PALETTE["muted"])
         self._render("message", text, PALETTE["muted"])   # grey: not analysed yet
-        self._render("sender", self._context_line(sender, prev), PALETTE["muted"])
+        self._render_sender(sender)
+        self._render("recognized", recognized or "", PALETTE["muted"])
 
     def applyPending_(self, payload):
-        text, sender, prev = payload
+        text, sender, _prev, recognized = payload
         self._show()
         self._render("status", "分析中…", PALETTE["muted"])
         self._render("message", text, PALETTE["text"])    # inked: this is the one
-        self._render("sender", self._context_line(sender, prev), PALETTE["muted"])
+        self._render_sender(sender)
+        self._render("recognized", recognized or "", PALETTE["muted"])
         self._clear_candidates()
         self._stream_rows = {}     # a new run starts at line zero in every slot
-        self.rows["cand_header"].setStringValue_("候选回复 · 等待判断…")
+        self._set_cand_header("候选回复 · 等待判断…", busy=True)
+        self._set_pending(self._active_slots())
 
     def applyJudgment_(self, payload):
-        v, sender, prev = payload
+        v, sender, _prev, recognized = payload
         self._show()
         # kept so a 话术 change can re-rank the new candidates against the same verdict
         self._last_intent = v.get("intent", "")
         self._last_risk = v.get("risk", 0)   # and so the overlay can badge the message
         self._render("message", v["message"], PALETTE["text"])
-        self._render("sender", self._context_line(sender, prev), PALETTE["muted"])
+        self._render_sender(sender, v.get("relationship"))
+        self._render("recognized", recognized or "", PALETTE["muted"])
         backend = v.get("backend", "")
         if backend.startswith("local ("):
-            # the backend label is "local (laya 不可用: ...)": take what is inside the
-            # parens, or the status line reads "... decider-2b)"
+            # the backend label is "local (<backend> 不可用: ...)": take what is
+            # inside the parens, or the status line reads "... decider-2b)"
             detail = backend.split("(", 1)[1].rstrip(")")
             self._render("status", f"本地兜底 · {detail[:26]}", PALETTE["amber"])
         elif backend:
@@ -1690,8 +1890,8 @@ class HudController(NSObject):
         # mean like 4.7 out of a 10-level distribution, and "4.7/9" reads as a measurement
         # while "5/9" reads as the estimate it is. Deliberately the mean and not the most
         # likely level — measured on 8 real messages, this model's top level never exceeds
-        # 0.4 and the argmax jumps 1/3/6 across near-identical criticism messages, while the
-        # mean holds (派活 2.0–2.4, 批评 3.0–4.0, 闲聊 1.7).
+        # 0.4 and the argmax jumps 1/3/6 across near-identical criticism messages, while
+        # the mean holds (workplace-preset measurement: 派活 2.0–2.4, 批评 3.0–4.0, 闲聊 1.7).
         risk = int(round(float(v.get("risk", 0))))
         label = "安全" if risk <= 3 else ("留神" if risk <= 6 else "危险")
         color = PALETTE["green"] if risk <= 3 else (
@@ -1700,7 +1900,8 @@ class HudController(NSObject):
         if hasattr(self, "_risk_dots"):
             self._set_risk_scale(risk)
         self._render("actions", " · ".join(v.get("actions", [])), PALETTE["text"])
-        self.rows["cand_header"].setStringValue_("候选回复 · 生成中…")
+        self._set_cand_header("候选回复 · 生成中…", busy=True)
+        self._set_pending(self._active_slots())
         # the verdict landing starts a new candidate run: without this reset, the streamed
         # line counters left over from the previous message would eat every new line
         # (applyStreamLine_ drops rows beyond PER_TONE) — only applyPending_ and
@@ -1710,7 +1911,9 @@ class HudController(NSObject):
     def applyCandidates_(self, payload):
         if not self._payload_current(payload):
             return
-        self.rows["cand_header"].setStringValue_(self._cand_header(payload))
+        for slot, _tone, _items in payload:
+            self._pending_slots.discard(slot)
+        self._set_cand_header(*self._cand_header(payload))
         self._render_groups(payload)
 
     def applyStreamLine_(self, payload):
@@ -1729,6 +1932,7 @@ class HudController(NSObject):
             return                       # the prompt asks for PER_TONE lines; extras stray
         self._stream_rows[slot] = row + 1
         self.cand_texts[slot * styles.PER_TONE + row] = text
+        self._pending_slots.discard(slot)   # first streamed line retires the placeholder
         if self._collapsed:
             return      # collapse keeps the data; _set_collapsed(False) puts it back up
         r = self._rows[slot][row]
@@ -1742,6 +1946,9 @@ class HudController(NSObject):
     def applyError_(self, text):
         self._show()                       # never vanish without telling the user why
         self._render("status", text, PALETTE["red"])
+        # nothing more is coming for the candidates: stop promising it
+        self._set_cand_header("候选回复")
+        self._set_pending([])
 
     def applyHidden_(self, reason):
         # WeChat gone or unreadable -> take the panel away (the app "opens with WeChat")

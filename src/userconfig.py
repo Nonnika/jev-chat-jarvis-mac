@@ -19,8 +19,8 @@ the same setting names is how you end up carefully editing the one nothing reads
 
 The names are the conventional ones you likely already export for other tools:
 
-    判断层 runs fully local (laya-coreml) and needs no key:
-    LAYA_COREML_MODEL    default aac6fef/laya-multilingual-coreml
+    判断层 runs fully local (decider-2b primary, laya-coreml fallback) and needs no key:
+    LAYA_COREML_MODEL    fallback model, default aac6fef/laya-multilingual-coreml
 
     TYPESAFE_API_KEY     legacy: only the manual `judge_jev.py` CLI reads these
     TYPESAFE_BASE_URL    the app itself no longer calls TypeSafe Jev
@@ -35,6 +35,12 @@ The names are the conventional ones you likely already export for other tools:
     ANTHROPIC_MODEL
 
     LLM_MODEL            shared model name, used when the per-provider one is absent
+
+Model cache (no setting needed): a source checkout keeps the judge models inside the
+repository at `<project>/.models/` — set as HF_HOME/LAYA_COREML_CACHE defaults at import
+time, before transformers or laya-coreml can pin the cache location. A built .app keeps
+the user-level `~/.cache/huggingface` instead: its own copy would be wiped by every app
+update. Set HF_HOME / LAYA_COREML_CACHE yourself to override either one.
 """
 
 from __future__ import annotations
@@ -43,7 +49,11 @@ import os
 import shlex
 from pathlib import Path
 
-PROJECT_ENV = Path(__file__).resolve().parent.parent / ".env"
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+PROJECT_ENV = PROJECT_ROOT / ".env"
+# <project>/.models — one folder holding every judge model this checkout downloads
+REPO_MODEL_CACHE = PROJECT_ROOT / ".models"
+CHAT_SCENES = {"general": "通用聊天", "relationship": "情侣与暧昧"}
 
 
 def config_dirs() -> list[Path]:
@@ -167,6 +177,12 @@ def get(*names: str) -> str:
     return ""
 
 
+def chat_scene() -> str:
+    """Explicit chat setting, read from the existing env sources."""
+    value = get("JEV_CHAT_SCENE").strip().lower()
+    return value if value in CHAT_SCENES else "general"
+
+
 def source_of(*names: str) -> str:
     for src, vals in _sources():
         for name in names:
@@ -215,3 +231,38 @@ def where() -> str:
         if parse_env_file(f):
             return str(f)
     return "（未找到配置文件）"
+
+
+def model_cache_root(root: Path) -> Path | None:
+    """Where a checkout rooted at `root` should keep downloaded models.
+
+    None inside a built bundle: it ships the same pyproject.toml a checkout has, so the
+    only reliable tell is the bundle path itself. Pure function, so the decision is
+    testable without touching os.environ (tests/test_model_cache.py).
+    """
+    if ".app/Contents/" in str(root):
+        return None
+    return root / ".models"
+
+
+def prefer_repo_model_cache(root: Path | None = None) -> str | None:
+    """Point Hugging Face's caches at the checkout, unless the user already chose one.
+
+    Called at import time (below): huggingface_hub reads HF_HOME when *it* is imported,
+    which happens later, inside Judge._load()/LayaJudge._load() — so this has to run
+    first, and importing this module is what every model-loading path starts with.
+
+    `get()` rather than os.environ: a user who put HF_HOME in ~/.config/jev-jarvis/env
+    means it, and CLI runs never source that file in a shell.
+    """
+    cache = model_cache_root(root or PROJECT_ROOT)
+    if cache is None:
+        return None
+    if not get("HF_HOME"):
+        os.environ["HF_HOME"] = str(cache)
+    if not get("LAYA_COREML_CACHE"):
+        os.environ["LAYA_COREML_CACHE"] = str(cache / "laya-coreml")
+    return str(cache)
+
+
+prefer_repo_model_cache()

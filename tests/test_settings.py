@@ -74,6 +74,25 @@ class SettingsFiles(unittest.TestCase):
                 with patch.object(userconfig, '_startup_sources', None), patch.dict(os.environ, {}, clear=True):
                     self.assertEqual(userconfig.provider('OPENAI')['model'], 'after')
 
+    def test_scene_save_preserves_credentials_and_waits_for_restart(self):
+        with tempfile.TemporaryDirectory() as d:
+            path = Path(d) / 'env'
+            original = '# keep\nOPENAI_API_KEY=test-only\nJEV_CHAT_SCENE=general # scene\n'
+            path.write_text(original)
+            with patch.dict(os.environ, {}, clear=True), patch.object(userconfig, '_startup_sources', None), patch.object(userconfig, 'env_files', return_value=[path]), patch.object(userconfig, 'PROJECT_ENV', Path(d) / '.env'):
+                userconfig.load()
+                self.assertEqual(userconfig.chat_scene(), 'general')
+                text = config.write_settings(path, original, {'JEV_CHAT_SCENE': 'relationship'})
+                self.assertIn('OPENAI_API_KEY=test-only\n', text)
+                self.assertIn('# scene', text)
+                self.assertEqual(path.stat().st_mode & 0o777, 0o600)
+                self.assertEqual(userconfig.chat_scene(), 'general')
+                with patch.object(userconfig, '_startup_sources', None), patch.dict(os.environ, {}, clear=True):
+                    self.assertEqual(userconfig.chat_scene(), 'relationship')
+                with self.assertRaises(ValueError):
+                    config.write_settings(path, text, {'JEV_CHAT_SCENE': 'unknown'})
+                self.assertEqual(path.read_text(), text)
+
 
 class Server(BaseHTTPRequestHandler):
     requests = []

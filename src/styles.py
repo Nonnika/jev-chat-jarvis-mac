@@ -20,8 +20,8 @@ import userconfig
 MAX_SLOTS = 3
 
 # Candidates per tone. Each tone gets its own request (they run concurrently), and the 2
-# replies in one response are the same voice at two different levels of nerve: the first
-# stays sendable as-is, the second leans into the persona (see PROMPT_ONE in generate.py).
+# replies in one response share a voice: comic tones use two levels of nerve, while
+# relationship tones use two grounded, respectful phrasings (see PROMPT_ONE).
 # A tone asked for twice in one prompt tends to bleed into itself, which is why one tone
 # equals one request.
 PER_TONE = 2
@@ -34,6 +34,19 @@ PER_TONE = 2
 # actually separates the voices. The trailing constraint matters as much as the rest: a tone
 # with no ceiling slides back into generic politeness by the second line.
 BUILTIN: dict[str, str] = {
+    "自然关心": (
+        "像平时认真听对方说话的人：接住具体感受，再回应眼前的事。用自然口语表达关心，"
+        "不说教、不用客服腔，不空泛地说「多喝热水」。关系未明确时保持分寸，不擅自叫宝贝。"
+    ),
+    "轻松甜一点": (
+        "自然地表达在意，可以轻轻开个双方都舒服的玩笑；甜在具体回应，不堆情话。"
+        "只有上文明示亲密关系或双方已经使用昵称时才用亲昵称呼；对方拒绝或不开心时认真回应，"
+        "不用暧昧、反话或撒娇转移问题。"
+    ),
+    "认真沟通": (
+        "像愿意把问题说清楚的伴侣或朋友：先回应对方具体的不满或需要，再表达自己的事实和边界，"
+        "可以提出一个可商量的下一步。不推卸、不反问指责、不无条件认错，也不替对方定义感受。"
+    ),
     "高情商话术": (
         "像公司里那个谁都说好的老同事：先接住对方情绪（「我理解」「确实」），再说事实和下一步，"
         "拒绝也带替代方案加一个具体时间点。不说教、不绕圈子、句尾不堆「呢/哦/啦」。"
@@ -81,7 +94,8 @@ BUILTIN: dict[str, str] = {
 }
 
 # What the panel starts with: two tones, not three — a third slot defaults to 不用.
-DEFAULT_SLOTS: list[str] = ["高情商话术", "贴吧老哥 v1.0"]
+DEFAULT_SLOTS: list[str] = ["自然关心", "轻松甜一点"]
+RELATION_TONES = frozenset({"自然关心", "轻松甜一点", "认真沟通"})
 NONE_LABEL = "不用"          # the third dropdown's way of saying "only two candidates"
 
 CUSTOM_VAR = "JEV_TONES"     # env var holding user-defined tones

@@ -26,7 +26,7 @@ class SettingsController(NSObject):
         self.controls = []
         self.busy = False
         self.window = A.NSWindow.alloc().initWithContentRect_styleMask_backing_defer_(
-            NSMakeRect(0, 0, 760, 600),
+            NSMakeRect(0, 0, 760, 650),
             A.NSWindowStyleMaskTitled | A.NSWindowStyleMaskClosable,
             A.NSBackingStoreBuffered, False)
         self.window.setAppearance_(A.NSAppearance.appearanceNamed_(A.NSAppearanceNameAqua))
@@ -36,20 +36,20 @@ class SettingsController(NSObject):
         self.window.setReleasedWhenClosed_(False)
         self.window.setDelegate_(self)
         view = self.window.contentView()
-        self.label(view, "模型设置", 24, 548, 710, 30, 22)
-        restart_box = A.NSBox.alloc().initWithFrame_(NSMakeRect(24, 512, 710, 32))
+        self.label(view, "模型设置", 24, 598, 710, 30, 22)
+        restart_box = A.NSBox.alloc().initWithFrame_(NSMakeRect(24, 562, 710, 32))
         restart_box.setBoxType_(A.NSBoxCustom)
         restart_box.setBorderType_(A.NSNoBorder)
         restart_box.setCornerRadius_(5)
         restart_box.setFillColor_(A.NSColor.colorWithCalibratedRed_green_blue_alpha_(1, 0.94, 0.82, 1))
         view.addSubview_(restart_box)
         restart_notice = self.label(view, "保存后请退出应用并重启",
-                                    36, 515.5, 686, 22, 15)
+                                    36, 565.5, 686, 22, 15)
         restart_notice.setFont_(A.NSFont.boldSystemFontOfSize_(15))
         restart_notice.setTextColor_(A.NSColor.colorWithCalibratedRed_green_blue_alpha_(0.55, 0.25, 0.02, 1))
         self.label(view, "编辑文件：" + str(self.path).replace(str(Path.home()), "~"),
-                   24, 476, 710, 34, 12)
-        self.tabs = A.NSTabView.alloc().initWithFrame_(NSMakeRect(16, 130, 728, 342))
+                   24, 526, 710, 34, 12)
+        self.tabs = A.NSTabView.alloc().initWithFrame_(NSMakeRect(16, 166, 728, 342))
         titles = ("生成 · OpenAI 兼容", "生成 · Anthropic 兼容")
         for index, (prefix, title) in enumerate(zip(config.PREFIXES, titles)):
             item = A.NSTabViewItem.alloc().initWithIdentifier_(prefix)
@@ -97,7 +97,21 @@ class SettingsController(NSObject):
             item.setView_(panel)
             self.tabs.addTabViewItem_(item)
         view.addSubview_(self.tabs)
-        self.label(view, "判断层（意图+风险）在本地运行（laya-coreml），无需密钥，本窗口只配置生成层。\n优先级：环境变量 > 用户 env > 项目 .env > 内置；两组生成密钥同时存在时 OpenAI 优先。", 24, 82, 710, 44, 12)
+        self.label(view, "判断场景", 24, 128, 88, 26)
+        self.scene_keys = list(userconfig.CHAT_SCENES)
+        self.scene_field = A.NSPopUpButton.alloc().initWithFrame_pullsDown_(NSMakeRect(112, 128, 220, 26), False)
+        self.scene_field.addItemsWithTitles_(list(userconfig.CHAT_SCENES.values()))
+        scene = values.get("JEV_CHAT_SCENE", "general")
+        scene = scene if scene in userconfig.CHAT_SCENES else "general"
+        self.initial["JEV_CHAT_SCENE"] = scene
+        self.scene_field.selectItemAtIndex_(self.scene_keys.index(scene))
+        self.scene_field.setTarget_(self)
+        self.scene_field.setAction_("sceneChanged:")
+        self.scene_field.setAccessibilityLabel_("判断场景")
+        view.addSubview_(self.scene_field)
+        self.controls.append(self.scene_field)
+        self.label(view, "本次：" + userconfig.CHAT_SCENES[userconfig.chat_scene()] + "；保存后重启生效。", 348, 128, 386, 26, 12)
+        self.label(view, "判断层（意图+风险）在本地运行（decider-2b），无需密钥。\n优先级：环境变量 > 用户 env > 项目 .env > 内置；两组生成密钥同时存在时 OpenAI 优先。", 24, 82, 710, 44, 12)
         self.status = self.label(view, "测试会发送固定问候语，不读取微信内容；可能产生少量服务费用。", 24, 36, 535, 42, 12)
         self.set_status(self.status.stringValue())
         self.save_button = self.button(view, "保存配置", "saveSettings:", 602, 38, 134)
@@ -179,8 +193,15 @@ class SettingsController(NSObject):
 
     @objc.python_method
     def changed(self):
-        return {f"{p}_{k}": v for p in config.PREFIXES for k, v in self.values(p).items()
-                if v != self.initial[f"{p}_{k}"]}
+        changes = {f"{p}_{k}": v for p in config.PREFIXES for k, v in self.values(p).items()
+                   if v != self.initial[f"{p}_{k}"]}
+        scene = self.scene_keys[self.scene_field.indexOfSelectedItem()]
+        if scene != self.initial["JEV_CHAT_SCENE"]:
+            changes["JEV_CHAT_SCENE"] = scene
+        return changes
+
+    def sceneChanged_(self, sender):
+        self.set_status("判断场景已修改，保存后请重启应用。")
 
     def controlTextDidChange_(self, notification):
         field = notification.object()

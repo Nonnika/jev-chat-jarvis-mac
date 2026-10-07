@@ -35,8 +35,11 @@ def write_settings(path: Path, original: str, changes: dict[str, str]) -> str:
     if read_document(path) != original:
         raise ValueError("配置文件已被其他程序修改，请关闭设置窗口后重新打开。")
     allowed = {f"{p}_{f}" for p in PREFIXES for f in FIELDS}
+    allowed.add("JEV_CHAT_SCENE")
     if not changes.keys() <= allowed:
         raise ValueError("不支持的配置项。")
+    if "JEV_CHAT_SCENE" in changes and changes["JEV_CHAT_SCENE"] not in userconfig.CHAT_SCENES:
+        raise ValueError("请选择有效的聊天场景。")
     for value in changes.values():
         if any(c in value for c in "\r\n\0"):
             raise ValueError("配置值不能含换行或空字符。")
